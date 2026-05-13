@@ -1,0 +1,10 @@
+frontend/
+.github/
+spotflac-server
+server
+*.exe
+*.test
+*.out
+.git/
+.DS_Store
+node_modules/
