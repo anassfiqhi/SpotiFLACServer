@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -510,8 +509,9 @@ func handleAudio(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /stream-audio/{spotify_id}
-// Streams a lossless FLAC audio track by resolving the Spotify ID through Amazon Music,
-// fetching the encrypted m4a, and piping it through ffmpeg decryption in real-time.
+// Resolves a Spotify track through Amazon Music, decrypts via ffmpeg into a temp
+// FLAC file, then serves it with http.ServeContent so the client gets a proper
+// Content-Length, correct FLAC STREAMINFO (total_samples), and Range support for seeking.
 func handleStreamAudio(w http.ResponseWriter, r *http.Request) {
 	spotifyID := pathSuffix(r, "/stream-audio/")
 	if spotifyID == "" {
@@ -531,32 +531,35 @@ func handleStreamAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tmp, err := os.CreateTemp("", "spotiflac-*.flac")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create temp file: "+err.Error())
+		return
+	}
+	tmpPath := tmp.Name()
+	tmp.Close()
+	defer os.Remove(tmpPath)
+
 	args := []string{"-hide_banner", "-loglevel", "error"}
 	if info.DecryptionKey != "" {
 		args = append(args, "-decryption_key", strings.TrimSpace(info.DecryptionKey))
 	}
-	args = append(args, "-i", info.StreamURL, "-vn", "-c:a", "flac", "-f", "flac", "pipe:1")
+	args = append(args, "-i", info.StreamURL, "-vn", "-c:a", "flac", "-y", tmpPath)
 
-	cmd := exec.CommandContext(r.Context(), ffmpegPath, args...)
-	pr, pw := io.Pipe()
-	cmd.Stdout = pw
-	cmd.Stderr = nil
-
-	if err := cmd.Start(); err != nil {
-		writeError(w, http.StatusInternalServerError, "ffmpeg start failed: "+err.Error())
+	if out, err := exec.CommandContext(r.Context(), ffmpegPath, args...).CombinedOutput(); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("ffmpeg failed: %v — %s", err, string(out)))
 		return
 	}
 
-	go func() {
-		cmd.Wait()
-		pw.Close()
-	}()
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to open temp file: "+err.Error())
+		return
+	}
+	defer f.Close()
 
-	w.Header().Set("Content-Type", "audio/flac")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"%s.flac\"", asin))
-	w.Header().Set("Transfer-Encoding", "chunked")
-	w.WriteHeader(http.StatusOK)
-	io.Copy(w, pr)
+	http.ServeContent(w, r, asin+".flac", time.Time{}, f)
 }
 
 // GET /queue
