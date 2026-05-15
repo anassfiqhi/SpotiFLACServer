@@ -336,6 +336,58 @@ func (t *TidalDownloader) GetDownloadURL(trackID int64, quality string) (string,
 	return "", fmt.Errorf("download URL not found in response")
 }
 
+// GetAudioURL resolves a Spotify track ID to a direct streamable audio URL via Tidal.
+// It tries the configured Tidal APIs in rotation and parses manifests as needed.
+func GetAudioURL(spotifyID, quality string) (string, error) {
+	if quality == "" {
+		quality = "HIGH"
+	}
+
+	dl := NewTidalDownloader("")
+	tidalURL, err := dl.GetTidalURLFromSpotify(spotifyID)
+	if err != nil {
+		return "", fmt.Errorf("tidal URL not found: %w", err)
+	}
+
+	trackID, err := dl.GetTrackIDFromURL(tidalURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid tidal URL: %w", err)
+	}
+
+	apis, apiErr := getConfiguredTidalAPIAttemptList()
+	if apiErr != nil && len(apis) == 0 {
+		return "", fmt.Errorf("no tidal APIs available: %w", apiErr)
+	}
+
+	var lastErr error
+	for _, apiURL := range apis {
+		downloader := NewTidalDownloader(apiURL)
+		rawURL, err := downloader.GetDownloadURL(trackID, quality)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		audioURL := rawURL
+		if strings.HasPrefix(rawURL, "MANIFEST:") {
+			manifest := strings.TrimPrefix(rawURL, "MANIFEST:")
+			directURL, _, _, _, parseErr := parseManifest(manifest)
+			if parseErr != nil || directURL == "" {
+				lastErr = fmt.Errorf("manifest parse failed: %v", parseErr)
+				continue
+			}
+			audioURL = directURL
+		}
+
+		return audioURL, nil
+	}
+
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", fmt.Errorf("no audio URL found")
+}
+
 func (t *TidalDownloader) DownloadFile(url, filepath string, quality string) error {
 
 	if strings.HasPrefix(url, "MANIFEST:") {

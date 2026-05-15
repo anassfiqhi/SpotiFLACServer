@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -487,6 +489,76 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GET /audio/{spotify_id}?quality=HIGH
+// Resolves a Spotify track to a direct CDN audio URL (via Tidal) and redirects to it.
+func handleAudio(w http.ResponseWriter, r *http.Request) {
+	spotifyID := pathSuffix(r, "/audio/")
+	if spotifyID == "" {
+		writeError(w, http.StatusBadRequest, "spotify_id is required")
+		return
+	}
+
+	quality := r.URL.Query().Get("quality")
+
+	audioURL, err := backend.GetAudioURL(spotifyID, quality)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "stream URL not found: "+err.Error())
+		return
+	}
+
+	http.Redirect(w, r, audioURL, http.StatusFound)
+}
+
+// GET /stream-audio/{spotify_id}
+// Streams a lossless FLAC audio track by resolving the Spotify ID through Amazon Music,
+// fetching the encrypted m4a, and piping it through ffmpeg decryption in real-time.
+func handleStreamAudio(w http.ResponseWriter, r *http.Request) {
+	spotifyID := pathSuffix(r, "/stream-audio/")
+	if spotifyID == "" {
+		writeError(w, http.StatusBadRequest, "spotify_id is required")
+		return
+	}
+
+	info, asin, err := backend.GetAmazonStreamInfo(spotifyID)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to get stream info: "+err.Error())
+		return
+	}
+
+	ffmpegPath, err := backend.GetFFmpegPath()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "ffmpeg not available: "+err.Error())
+		return
+	}
+
+	args := []string{"-hide_banner", "-loglevel", "error"}
+	if info.DecryptionKey != "" {
+		args = append(args, "-decryption_key", strings.TrimSpace(info.DecryptionKey))
+	}
+	args = append(args, "-i", info.StreamURL, "-vn", "-c:a", "flac", "-f", "flac", "pipe:1")
+
+	cmd := exec.CommandContext(r.Context(), ffmpegPath, args...)
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	cmd.Stderr = nil
+
+	if err := cmd.Start(); err != nil {
+		writeError(w, http.StatusInternalServerError, "ffmpeg start failed: "+err.Error())
+		return
+	}
+
+	go func() {
+		cmd.Wait()
+		pw.Close()
+	}()
+
+	w.Header().Set("Content-Type", "audio/flac")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"%s.flac\"", asin))
+	w.Header().Set("Transfer-Encoding", "chunked")
+	w.WriteHeader(http.StatusOK)
+	io.Copy(w, pr)
+}
+
 // GET /queue
 func handleQueue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, backend.GetDownloadQueue())
@@ -532,6 +604,8 @@ func main() {
 	mux.HandleFunc("/availability/", handleAvailability)
 	mux.HandleFunc("/isrc/", handleISRC)
 	mux.HandleFunc("/lyrics/", handleLyrics)
+	mux.HandleFunc("/audio/", handleAudio)
+	mux.HandleFunc("/stream-audio/", handleStreamAudio)
 	mux.HandleFunc("/download", handleDownload)
 	mux.HandleFunc("/queue", handleQueue)
 	mux.HandleFunc("/history", handleHistory)

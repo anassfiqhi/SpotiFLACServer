@@ -122,6 +122,54 @@ func (a *AmazonDownloader) GetAmazonURLFromSpotify(spotifyTrackID string) (strin
 	return amazonURL, nil
 }
 
+// GetStreamInfo resolves a Spotify track ID to an Amazon stream URL and optional decryption key.
+func GetAmazonStreamInfo(spotifyTrackID string) (*AmazonStreamResponse, string, error) {
+	dl := NewAmazonDownloader()
+	amazonURL, err := dl.GetAmazonURLFromSpotify(spotifyTrackID)
+	if err != nil {
+		return nil, "", err
+	}
+
+	asinRegex := regexp.MustCompile(`(B[0-9A-Z]{9})`)
+	asin := asinRegex.FindString(amazonURL)
+	if asin == "" {
+		return nil, "", fmt.Errorf("failed to extract ASIN from URL: %s", amazonURL)
+	}
+
+	apiURL := fmt.Sprintf("%s/api/track/%s", amazonMusicAPIBaseURL, asin)
+	req, err := NewRequestWithDefaultHeaders(http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, "", err
+	}
+
+	debugKey, err := getAmazonMusicDebugKey()
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to decrypt Amazon debug key: %w", err)
+	}
+	req.Header.Set("X-Debug-Key", debugKey)
+
+	resp, err := dl.client.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, "", fmt.Errorf("Amazon API returned status %d", resp.StatusCode)
+	}
+
+	var apiResp AmazonStreamResponse
+	if err := json.Unmarshal(func() []byte { b, _ := io.ReadAll(resp.Body); return b }(), &apiResp); err != nil {
+		return nil, "", fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if apiResp.StreamURL == "" {
+		return nil, "", fmt.Errorf("no stream URL in Amazon response")
+	}
+
+	return &apiResp, asin, nil
+}
+
 func (a *AmazonDownloader) DownloadFromAfkarXYZ(amazonURL, outputDir, quality string) (string, error) {
 
 	asinRegex := regexp.MustCompile(`(B[0-9A-Z]{9})`)
