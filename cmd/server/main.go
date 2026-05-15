@@ -11,11 +11,103 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/afkarxyz/SpotiFLAC/backend"
 )
+
+// ── Audio cache ───────────────────────────────────────────────────────────────
+
+type audioEntry struct {
+	ready chan struct{} // closed when download+decode is done
+	path  string
+	err   error
+}
+
+var (
+	audioMu      sync.Mutex
+	audioEntries = map[string]*audioEntry{}
+)
+
+// ensureAudioFile returns a path to a ready FLAC file for the given Spotify ID.
+// Concurrent calls for the same ID share one download; completed files are cached.
+func ensureAudioFile(ctx context.Context, spotifyID string) (string, error) {
+	audioMu.Lock()
+	if e, ok := audioEntries[spotifyID]; ok {
+		audioMu.Unlock()
+		select {
+		case <-e.ready:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		if e.err != nil {
+			return "", e.err
+		}
+		if _, err := os.Stat(e.path); err == nil {
+			return e.path, nil
+		}
+		// Cached file was deleted (container restart) — re-download.
+		audioMu.Lock()
+		delete(audioEntries, spotifyID)
+		audioMu.Unlock()
+	} else {
+		audioMu.Unlock()
+	}
+
+	audioMu.Lock()
+	// Double-check after re-acquiring lock.
+	if e, ok := audioEntries[spotifyID]; ok {
+		audioMu.Unlock()
+		select {
+		case <-e.ready:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		if e.err != nil {
+			return "", e.err
+		}
+		return e.path, nil
+	}
+	e := &audioEntry{ready: make(chan struct{})}
+	audioEntries[spotifyID] = e
+	audioMu.Unlock()
+
+	e.path, e.err = downloadAndDecodeAudio(spotifyID)
+	if e.err != nil {
+		audioMu.Lock()
+		delete(audioEntries, spotifyID)
+		audioMu.Unlock()
+	}
+	close(e.ready)
+	return e.path, e.err
+}
+
+func downloadAndDecodeAudio(spotifyID string) (string, error) {
+	info, _, err := backend.GetAmazonStreamInfo(spotifyID)
+	if err != nil {
+		return "", fmt.Errorf("stream info: %w", err)
+	}
+
+	ffmpegPath, err := backend.GetFFmpegPath()
+	if err != nil {
+		return "", fmt.Errorf("ffmpeg: %w", err)
+	}
+
+	outPath := filepath.Join(os.TempDir(), "spotiflac-"+spotifyID+".flac")
+
+	args := []string{"-hide_banner", "-loglevel", "error"}
+	if info.DecryptionKey != "" {
+		args = append(args, "-decryption_key", strings.TrimSpace(info.DecryptionKey))
+	}
+	args = append(args, "-i", info.StreamURL, "-vn", "-c:a", "flac", "-y", outPath)
+
+	if out, err := exec.Command(ffmpegPath, args...).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("ffmpeg: %v — %s", err, string(out))
+	}
+	return outPath, nil
+}
 
 // ── Request / Response types ──────────────────────────────────────────────────
 
@@ -509,9 +601,8 @@ func handleAudio(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /stream-audio/{spotify_id}
-// Resolves a Spotify track through Amazon Music, decrypts via ffmpeg into a temp
-// FLAC file, then serves it with http.ServeContent so the client gets a proper
-// Content-Length, correct FLAC STREAMINFO (total_samples), and Range support for seeking.
+// Serves a cached FLAC file for the track, downloading and decoding on first request.
+// Concurrent requests for the same ID share one download; cache persists for container lifetime.
 func handleStreamAudio(w http.ResponseWriter, r *http.Request) {
 	spotifyID := pathSuffix(r, "/stream-audio/")
 	if spotifyID == "" {
@@ -519,47 +610,33 @@ func handleStreamAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, asin, err := backend.GetAmazonStreamInfo(spotifyID)
+	path, err := ensureAudioFile(r.Context(), spotifyID)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to get stream info: "+err.Error())
+		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 
-	ffmpegPath, err := backend.GetFFmpegPath()
+	f, err := os.Open(path)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "ffmpeg not available: "+err.Error())
-		return
-	}
-
-	tmp, err := os.CreateTemp("", "spotiflac-*.flac")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create temp file: "+err.Error())
-		return
-	}
-	tmpPath := tmp.Name()
-	tmp.Close()
-	defer os.Remove(tmpPath)
-
-	args := []string{"-hide_banner", "-loglevel", "error"}
-	if info.DecryptionKey != "" {
-		args = append(args, "-decryption_key", strings.TrimSpace(info.DecryptionKey))
-	}
-	args = append(args, "-i", info.StreamURL, "-vn", "-c:a", "flac", "-y", tmpPath)
-
-	if out, err := exec.CommandContext(r.Context(), ffmpegPath, args...).CombinedOutput(); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("ffmpeg failed: %v — %s", err, string(out)))
-		return
-	}
-
-	f, err := os.Open(tmpPath)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to open temp file: "+err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to open audio file: "+err.Error())
 		return
 	}
 	defer f.Close()
 
-	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"%s.flac\"", asin))
-	http.ServeContent(w, r, asin+".flac", time.Time{}, f)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"%s.flac\"", spotifyID))
+	http.ServeContent(w, r, spotifyID+".flac", time.Time{}, f)
+}
+
+// GET /prefetch/{spotify_id}
+// Triggers background download+decode so /stream-audio/ responds immediately on next call.
+func handlePrefetch(w http.ResponseWriter, r *http.Request) {
+	spotifyID := pathSuffix(r, "/prefetch/")
+	if spotifyID == "" {
+		writeError(w, http.StatusBadRequest, "spotify_id is required")
+		return
+	}
+	go ensureAudioFile(context.Background(), spotifyID) //nolint
+	w.WriteHeader(http.StatusAccepted)
 }
 
 // GET /queue
@@ -609,6 +686,7 @@ func main() {
 	mux.HandleFunc("/lyrics/", handleLyrics)
 	mux.HandleFunc("/audio/", handleAudio)
 	mux.HandleFunc("/stream-audio/", handleStreamAudio)
+	mux.HandleFunc("/prefetch/", handlePrefetch)
 	mux.HandleFunc("/download", handleDownload)
 	mux.HandleFunc("/queue", handleQueue)
 	mux.HandleFunc("/history", handleHistory)
