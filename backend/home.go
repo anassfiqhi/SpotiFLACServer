@@ -101,13 +101,55 @@ func FetchHomeFeed(ctx context.Context) ([]HomeFeedSection, error) {
 	}
 	sections = append(sections, catSecs...)
 
-	if len(sections) > 0 {
-		homeCacheMu.Lock()
-		homeCache = &homeFeedCache{sections: sections, fetchedAt: time.Now()}
-		homeCacheMu.Unlock()
+	if len(sections) == 0 {
+		sections = staticFallbackSections()
 	}
 
+	homeCacheMu.Lock()
+	homeCache = &homeFeedCache{sections: sections, fetchedAt: time.Now()}
+	homeCacheMu.Unlock()
+
 	return sections, nil
+}
+
+func staticFallbackSections() []HomeFeedSection {
+	pl := func(id, title string) HomeFeedPlaylist { return HomeFeedPlaylist{ID: id, Title: title} }
+	return []HomeFeedSection{
+		{Title: "Charts", Playlists: []HomeFeedPlaylist{
+			pl("37i9dQZEVXbMDoHDwVN2tF", "Global Top 50"),
+			pl("37i9dQZEVXbG9PaY9ysBUa", "Viral 50 Global"),
+			pl("37i9dQZEVXbLiRSasKsNU9", "Hot Hits USA"),
+			pl("37i9dQZEVXbLnolsZ8PSNw", "UK Top 50"),
+			pl("37i9dQZF1DXcBWIGoYBM5M", "Today's Top Hits"),
+		}},
+		{Title: "New Releases", Playlists: []HomeFeedPlaylist{
+			pl("37i9dQZF1DX4JAvHpjipBk", "New Music Friday"),
+			pl("37i9dQZF1DX4W3atWv6Um5", "New Music Friday UK"),
+			pl("37i9dQZF1DX2pSTOxoPbx9", "Fresh Finds"),
+		}},
+		{Title: "Mood", Playlists: []HomeFeedPlaylist{
+			pl("37i9dQZF1DXdPec7aLTmlC", "Happy Hits"),
+			pl("37i9dQZF1DX3YSRoSdA634", "Sad Songs"),
+			pl("37i9dQZF1DX4sWSpwq3LiO", "Peaceful Piano"),
+			pl("37i9dQZF1DWZeKCadgRdKQ", "Deep Focus"),
+		}},
+		{Title: "Decades", Playlists: []HomeFeedPlaylist{
+			pl("37i9dQZF1DX4UtSsGT1Sk5", "All Out 80s"),
+			pl("37i9dQZF1DXbG22YGu2p27", "All Out 90s"),
+			pl("37i9dQZF1DX4o1oenSJRJd", "All Out 2000s"),
+			pl("37i9dQZF1DX5Opy0CPft2d", "All Out 2010s"),
+		}},
+		{Title: "Hip-Hop", Playlists: []HomeFeedPlaylist{
+			pl("37i9dQZF1DX0XUsuxWHRQd", "Rap Caviar"),
+			pl("37i9dQZF1DX2vMjgTAMasj", "Most Necessary"),
+			pl("37i9dQZF1DWUW2bvSkjcJ9", "Trap Nation"),
+		}},
+		{Title: "Rock", Playlists: []HomeFeedPlaylist{
+			pl("37i9dQZF1DWXRqgorJj26U", "Rock Classics"),
+			pl("37i9dQZF1DX9GRpeH4CL0S", "Alternative"),
+			pl("37i9dQZF1DWWOaP4kN0kGo", "Metal"),
+		}},
+	}
 }
 
 // spotifyV1Get performs a GET request to the Spotify v1 REST API.
