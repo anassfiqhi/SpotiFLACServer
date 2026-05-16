@@ -235,10 +235,15 @@ func fetchCategoryPlaylists(ctx context.Context, token, categoryID string) ([]Ho
 
 func extractPlaylistCoverURL(p map[string]interface{}) string {
 	images, _ := p["images"].([]interface{})
-	if len(images) == 0 {
-		return ""
+	for _, raw := range images {
+		img, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		url, _ := img["url"].(string)
+		if url != "" {
+			return url
+		}
 	}
-	img, _ := images[0].(map[string]interface{})
-	url, _ := img["url"].(string)
-	return url
+	return ""
 }
