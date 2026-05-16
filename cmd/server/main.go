@@ -644,6 +644,19 @@ func handleQueue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, backend.GetDownloadQueue())
 }
 
+// GET /home
+func handleHome(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	sections, err := backend.FetchHomeFeed(ctx)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, sections)
+}
+
 // GET /history
 func handleHistory(w http.ResponseWriter, r *http.Request) {
 	items, err := backend.GetHistoryItems("SpotiFLAC")
@@ -687,6 +700,7 @@ func main() {
 	mux.HandleFunc("/audio/", handleAudio)
 	mux.HandleFunc("/stream-audio/", handleStreamAudio)
 	mux.HandleFunc("/prefetch/", handlePrefetch)
+	mux.HandleFunc("/home", handleHome)
 	mux.HandleFunc("/download", handleDownload)
 	mux.HandleFunc("/queue", handleQueue)
 	mux.HandleFunc("/history", handleHistory)
