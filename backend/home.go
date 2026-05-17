@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -288,4 +289,80 @@ func extractPlaylistCoverURL(p map[string]interface{}) string {
 		}
 	}
 	return ""
+}
+
+// RecommendedTrack matches the SpotifyTrack shape used by the app.
+type RecommendedTrack struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Artists    string `json:"artists"`
+	AlbumName  string `json:"album_name"`
+	Images     string `json:"images"`
+	DurationMs int    `json:"duration_ms"`
+}
+
+// FetchRecommendations returns tracks similar to the given seed track via Spotify's recommendations API.
+func FetchRecommendations(ctx context.Context, seedTrackID string, limit int) ([]RecommendedTrack, error) {
+	client := NewSpotifyClient()
+	if err := client.Initialize(); err != nil {
+		return nil, fmt.Errorf("spotify init: %w", err)
+	}
+
+	url := fmt.Sprintf(
+		"https://api.spotify.com/v1/recommendations?seed_tracks=%s&limit=%d",
+		seedTrackID, limit,
+	)
+	data, err := spotifyV1Get(ctx, client.accessToken, url)
+	if err != nil {
+		return nil, fmt.Errorf("recommendations API: %w", err)
+	}
+
+	rawTracks, _ := data["tracks"].([]interface{})
+	tracks := make([]RecommendedTrack, 0, len(rawTracks))
+
+	for _, raw := range rawTracks {
+		t, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		id, _ := t["id"].(string)
+		name, _ := t["name"].(string)
+		durationMs, _ := t["duration_ms"].(float64)
+
+		var artistNames []string
+		if artists, ok := t["artists"].([]interface{}); ok {
+			for _, a := range artists {
+				if artist, ok := a.(map[string]interface{}); ok {
+					if n, _ := artist["name"].(string); n != "" {
+						artistNames = append(artistNames, n)
+					}
+				}
+			}
+		}
+
+		albumName, imageURL := "", ""
+		if album, ok := t["album"].(map[string]interface{}); ok {
+			albumName, _ = album["name"].(string)
+			if imgs, ok := album["images"].([]interface{}); ok && len(imgs) > 0 {
+				if img, ok := imgs[0].(map[string]interface{}); ok {
+					imageURL, _ = img["url"].(string)
+				}
+			}
+		}
+
+		if id == "" {
+			continue
+		}
+		tracks = append(tracks, RecommendedTrack{
+			ID:         id,
+			Name:       name,
+			Artists:    strings.Join(artistNames, ", "),
+			AlbumName:  albumName,
+			Images:     imageURL,
+			DurationMs: int(durationMs),
+		})
+	}
+
+	return tracks, nil
 }

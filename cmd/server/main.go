@@ -657,6 +657,31 @@ func handleHome(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sections)
 }
 
+// GET /recommendations/{track_id}?limit=20
+func handleRecommendations(w http.ResponseWriter, r *http.Request) {
+	trackID := pathSuffix(r, "/recommendations/")
+	if trackID == "" {
+		writeError(w, http.StatusBadRequest, "track_id is required")
+		return
+	}
+
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+
+	tracks, err := backend.FetchRecommendations(ctx, trackID, limit)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"tracks": tracks, "total": len(tracks)})
+}
+
 // GET /history
 func handleHistory(w http.ResponseWriter, r *http.Request) {
 	items, err := backend.GetHistoryItems("SpotiFLAC")
@@ -701,6 +726,7 @@ func main() {
 	mux.HandleFunc("/stream-audio/", handleStreamAudio)
 	mux.HandleFunc("/prefetch/", handlePrefetch)
 	mux.HandleFunc("/home", handleHome)
+	mux.HandleFunc("/recommendations/", handleRecommendations)
 	mux.HandleFunc("/download", handleDownload)
 	mux.HandleFunc("/queue", handleQueue)
 	mux.HandleFunc("/history", handleHistory)
